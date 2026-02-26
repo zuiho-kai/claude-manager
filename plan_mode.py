@@ -9,16 +9,23 @@ from db import execute, execute_returning, fetch_one, fetch_all
 
 logger = logging.getLogger(__name__)
 
-PLAN_PROMPT_TEMPLATE = """You are a senior software architect. Given the following goal, produce a detailed implementation plan.
+PLAN_PROMPT_TEMPLATE = """You are a senior software architect. Given the following goal, produce a detailed implementation plan broken into multiple concrete steps. Each step should be a self-contained task that Claude Code can execute independently.
 
 GOAL:
 {goal}
+
+Rules:
+- Break the goal into 2-6 concrete steps (not just one big step)
+- Each step should be independently executable
+- Each step's prompt should be detailed enough for Claude Code to execute without asking questions
+- Steps should be ordered by dependency (earlier steps first)
+- Include specific file names, function names, and implementation details in each prompt
 
 Output a JSON object with this structure:
 {{
   "summary": "Brief summary of the plan",
   "steps": [
-    {{"title": "Step title", "description": "What to do", "prompt": "The exact prompt to give to Claude Code to execute this step"}}
+    {{"title": "Step title", "description": "What this step does", "prompt": "The exact detailed prompt to give to Claude Code to execute this step"}}
   ]
 }}
 

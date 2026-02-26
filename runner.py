@@ -22,6 +22,8 @@ def build_claude_args(prompt: str, cwd: Optional[str] = None, verbose: bool = Tr
         "-p", prompt,
         "--dangerously-skip-permissions",
         "--output-format", "stream-json",
+        "--append-system-prompt",
+        "IMPORTANT: You are running in non-interactive batch mode. Do NOT ask the user any questions, do NOT present choices or menus, do NOT wait for input. Make reasonable decisions on your own and proceed directly with the task. Use Python unless otherwise specified.",
     ]
     if verbose:
         args.append("--verbose")
