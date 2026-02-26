@@ -5,6 +5,7 @@ from typing import Optional, List
 import asyncio
 import json
 import logging
+import os
 import subprocess
 import threading
 from datetime import datetime
@@ -83,11 +84,19 @@ async def run_claude_task(
 
     try:
         # Use subprocess.Popen in a thread to avoid Windows asyncio issues
+        # Remove CLAUDECODE env var to allow nested sessions
+        env = dict(os.environ)
+        env.pop("CLAUDECODE", None)
+        env.pop("CLAUDE_CODE_ENTRYPOINT", None)
+        env["PYTHONIOENCODING"] = "utf-8"
         proc = subprocess.Popen(
             args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=cwd,
+            env=env,
+            encoding="utf-8",
+            errors="replace",
         )
 
         # Read stdout lines in a thread, push to an asyncio queue
@@ -95,8 +104,8 @@ async def run_claude_task(
 
         def _reader():
             try:
-                for raw_line in proc.stdout:
-                    line = raw_line.decode("utf-8", errors="replace").strip()
+                for line in proc.stdout:
+                    line = line.strip()
                     if line:
                         loop.call_soon_threadsafe(queue.put_nowait, line)
             finally:
@@ -145,7 +154,7 @@ async def run_claude_task(
             status = "completed"
         else:
             status = "failed"
-            stderr_text = proc.stderr.read().decode("utf-8", errors="replace").strip()
+            stderr_text = proc.stderr.read().strip()
             if stderr_text and not result_text:
                 result_text = f"Process exited with code {returncode}: {stderr_text}"
 
