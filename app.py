@@ -298,16 +298,9 @@ original_broadcast = manager.broadcast
 async def enhanced_broadcast(task_id: int, event_type: str, payload: dict):
     await original_broadcast(task_id, event_type, payload)
 
-    # Check for task completion events
-    if payload.get("type") == "result" and task_id > 0:
-        task = await fetch_one("SELECT * FROM tasks WHERE id=?", (task_id,))
-        if task:
-            # Handle plan mode completion
-            if task.get("mode") == "plan":
-                await on_plan_task_complete(task_id)
-            # Check plan group completion
-            if task.get("plan_group_id"):
-                await check_plan_completion(task["plan_group_id"])
+    # Note: plan mode completion is handled in ralph_loop._run_and_release
+    # AFTER result_text is saved to DB. Do NOT handle it here — result_text
+    # hasn't been written yet when the "result" event streams through.
 
 manager.broadcast = enhanced_broadcast
 

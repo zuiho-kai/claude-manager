@@ -79,7 +79,13 @@ function renderTasks() {
 
     if (!filtered.length) { list.innerHTML = '<div class="empty-state">No tasks here.</div>'; return; }
     list.innerHTML = filtered.map(function(t) {
-        var p = esc((t.prompt_short||t.prompt||'').substring(0,120));
+        var promptText = t.prompt_short||t.prompt||'';
+        // Clean up plan-mode tasks: show goal instead of verbose template
+        if (t.mode === 'plan' && promptText.indexOf('GOAL:') !== -1) {
+            var goalMatch = promptText.match(/GOAL:\s*\n([\s\S]*?)(\n\nOutput|$)/);
+            promptText = goalMatch ? '[Plan] ' + goalMatch[1].trim() : '[Plan] generating...';
+        }
+        var p = esc(promptText.substring(0,120));
         var active = t.id === selectedTaskId ? ' active' : '';
         var plan = t.plan_group_id ? '<span class="plan-link" onclick="event.stopPropagation();viewPlan('+t.plan_group_id+')">plan#'+t.plan_group_id+'</span>' : '';
         var cost = t.cost_usd ? '$'+t.cost_usd.toFixed(3) : '';
@@ -228,7 +234,19 @@ async function submitPlan() {
     try {
         var r = await api('/api/plan',{method:'POST',body:JSON.stringify({goal:goal})});
         closeModal('planModal'); refreshAll();
-        setTimeout(function(){viewPlan(r.group_id);}, 2000);
+        // Poll until plan is ready for review (or timeout after 120s)
+        var gid = r.group_id;
+        var attempts = 0;
+        var poll = setInterval(async function(){
+            attempts++;
+            try {
+                var plan = await api('/api/plan/'+gid);
+                if (plan.status !== 'planning' || attempts > 60) {
+                    clearInterval(poll);
+                    viewPlan(gid);
+                }
+            } catch(e) { clearInterval(poll); }
+        }, 2000);
     } catch(e) { alert(e.message); }
 }
 

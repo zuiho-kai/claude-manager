@@ -44,7 +44,10 @@ async def create_plan_group(goal: str) -> int:
 
 
 async def on_plan_task_complete(task_id: int):
-    """Called when a planning task finishes. Parse the plan and update the group."""
+    """Called when a planning task finishes. Parse the plan and update the group.
+
+    Must be called AFTER result_text is saved to DB (not from broadcast hook).
+    """
     task = await fetch_one("SELECT * FROM tasks WHERE id=?", (task_id,))
     if not task or task["mode"] != "plan":
         return
@@ -55,19 +58,43 @@ async def on_plan_task_complete(task_id: int):
 
     result_text = task.get("result_text", "") or ""
 
-    # Try to extract JSON from result
-    plan_data = None
-    try:
-        plan_data = json.loads(result_text)
-    except json.JSONDecodeError:
-        # Try to find JSON in the text
-        start = result_text.find("{")
-        end = result_text.rfind("}") + 1
-        if start >= 0 and end > start:
+    # Also try to extract from task_logs if result_text is empty
+    if not result_text.strip():
+        logs = await fetch_all(
+            "SELECT payload FROM task_logs WHERE task_id=? AND event_type='result' ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        )
+        if logs:
             try:
-                plan_data = json.loads(result_text[start:end])
-            except json.JSONDecodeError:
+                payload = json.loads(logs[0]["payload"])
+                result_text = payload.get("result", "")
+            except (json.JSONDecodeError, TypeError):
                 pass
+
+    if not result_text.strip():
+        # Last resort: scan assistant messages for JSON
+        logs = await fetch_all(
+            "SELECT payload FROM task_logs WHERE task_id=? AND event_type='assistant' ORDER BY id",
+            (task_id,),
+        )
+        for log in logs:
+            try:
+                payload = json.loads(log["payload"])
+                text = ""
+                if payload.get("message", {}).get("content"):
+                    parts = payload["message"]["content"]
+                    text = "".join(c.get("text", "") for c in parts) if isinstance(parts, list) else str(parts)
+                elif payload.get("content"):
+                    parts = payload["content"]
+                    text = "".join(c.get("text", "") for c in parts) if isinstance(parts, list) else str(parts)
+                if text and "{" in text:
+                    result_text = text
+                    break
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+    # Try to extract JSON from result
+    plan_data = _extract_json(result_text)
 
     if plan_data:
         await execute(
@@ -81,6 +108,31 @@ async def on_plan_task_complete(task_id: int):
             (result_text, group_id),
         )
         logger.warning(f"Plan group {group_id}: could not parse JSON plan, storing raw text")
+
+
+def _extract_json(text):
+    """Try to extract a JSON object from text."""
+    if not text:
+        return None
+    text = text.strip()
+    # Strip markdown fences
+    if text.startswith("```"):
+        lines = text.split("\n")
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        text = "\n".join(lines).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # Find first { to last }
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start >= 0 and end > start:
+        try:
+            return json.loads(text[start:end])
+        except json.JSONDecodeError:
+            pass
+    return None
 
 
 async def approve_plan(group_id: int, notify_scheduler=None) -> List[int]:

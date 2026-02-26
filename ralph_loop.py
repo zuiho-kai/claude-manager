@@ -8,6 +8,7 @@ import logging
 from db import fetch_one, fetch_all, execute
 from runner import run_claude_task
 from worktree import acquire, release
+from plan_mode import on_plan_task_complete, check_plan_completion
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +135,22 @@ class RalphLoop:
     async def _run_and_release(self, worker: Worker, task_id: int, prompt: str, cwd: Optional[str], worktree_id: Optional[int]):
         try:
             status = await run_claude_task(task_id, prompt, cwd=cwd, broadcast=self.broadcast)
+
+            task = await fetch_one("SELECT * FROM tasks WHERE id=?", (task_id,))
+            if task:
+                # Handle plan mode: parse plan JSON and transition to "reviewing"
+                if task.get("mode") == "plan":
+                    try:
+                        await on_plan_task_complete(task_id)
+                    except Exception:
+                        logger.exception(f"Plan completion failed for task {task_id}")
+
+                # Check if all subtasks in a plan group are done
+                if task.get("plan_group_id"):
+                    try:
+                        await check_plan_completion(task["plan_group_id"])
+                    except Exception:
+                        logger.exception(f"Plan group check failed for task {task_id}")
 
             # Auto-progress: summarize completed tasks
             if status == "completed":
