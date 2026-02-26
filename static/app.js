@@ -284,15 +284,33 @@ async function submitPlan() {
     } catch(e) { alert(e.message); }
 }
 
+var _currentPlanGid = null;
+var _currentPlanSteps = [];
+
 async function viewPlan(gid) {
     try {
         var plan = await api('/api/plan/'+gid);
+        _currentPlanGid = gid;
         document.getElementById('planDetailGoal').textContent = plan.goal||'';
         var sc = plan.status==='reviewing'?'queued':plan.status==='executing'?'running':plan.status;
         document.getElementById('planDetailStatus').innerHTML = '<span class="tag tag-'+sc+'">'+plan.status+'</span>';
         var sl = document.getElementById('planSteps');
         var steps = plan.plan_steps||[], subs = plan.tasks||[];
-        if (steps.length) {
+        _currentPlanSteps = steps;
+
+        if (steps.length && plan.status === 'reviewing') {
+            // Editable plan review
+            sl.innerHTML = steps.map(function(s,i){
+                return '<li class="plan-step" data-step="'+i+'">' +
+                    '<div style="display:flex;justify-content:space-between;align-items:center">' +
+                    '<strong contenteditable="true" class="step-title" data-idx="'+i+'">'+esc(s.title||'Step '+(i+1))+'</strong>' +
+                    '<button class="btn-sm danger" style="padding:2px 6px;font-size:10px" onclick="removeStep('+i+')">✕</button></div>' +
+                    '<div contenteditable="true" class="step-desc step-desc-edit" data-idx="'+i+'">'+esc(s.description||'')+'</div>' +
+                    '</li>';
+            }).join('') +
+            '<li class="plan-step" style="text-align:center;cursor:pointer;color:var(--accent)" onclick="addStep()">+ Add step</li>';
+        } else if (steps.length) {
+            // Read-only view (executing/completed)
             sl.innerHTML = steps.map(function(s,i){
                 var sub = subs.find(function(t){return t.prompt&&t.prompt.indexOf('Step '+(i+1))!==-1;});
                 var cls = sub?(sub.status==='completed'?'done':sub.status==='running'?'running':''):'';
@@ -303,12 +321,58 @@ async function viewPlan(gid) {
         } else if (plan.plan_text) {
             sl.innerHTML = '<li class="plan-step"><pre style="white-space:pre-wrap;font-size:12px">'+esc(plan.plan_text)+'</pre></li>';
         } else { sl.innerHTML = '<li class="plan-step" style="color:var(--dim)">Generating plan...</li>'; }
+
         var acts = document.getElementById('planDetailActions');
         acts.innerHTML = plan.status==='reviewing'
-            ? '<button class="btn-sm" onclick="closeModal(\'planDetailModal\')">Close</button><button class="btn-sm primary" onclick="approvePlan('+gid+')">Approve</button>'
+            ? '<button class="btn-sm" onclick="closeModal(\'planDetailModal\')">Close</button><button class="btn-sm primary" onclick="saveThenApprove('+gid+')">Approve</button>'
             : '<button class="btn-sm" onclick="closeModal(\'planDetailModal\')">Close</button>';
         openModal('planDetailModal');
     } catch(e) { alert(e.message); }
+}
+
+function removeStep(idx) {
+    _currentPlanSteps.splice(idx, 1);
+    viewPlan(_currentPlanGid);
+}
+
+function addStep() {
+    _currentPlanSteps.push({title: 'New step', description: 'Describe what to do', prompt: ''});
+    viewPlan(_currentPlanGid);
+}
+
+function collectEditedSteps() {
+    // Read back edited titles and descriptions from contenteditable elements
+    var titles = document.querySelectorAll('.step-title[data-idx]');
+    var descs = document.querySelectorAll('.step-desc-edit[data-idx]');
+    titles.forEach(function(el) {
+        var i = parseInt(el.dataset.idx);
+        if (_currentPlanSteps[i]) _currentPlanSteps[i].title = el.textContent.trim();
+    });
+    descs.forEach(function(el) {
+        var i = parseInt(el.dataset.idx);
+        if (_currentPlanSteps[i]) {
+            _currentPlanSteps[i].description = el.textContent.trim();
+            // Update prompt to match description if prompt was auto-generated
+            if (!_currentPlanSteps[i].prompt || _currentPlanSteps[i].prompt === _currentPlanSteps[i].description) {
+                _currentPlanSteps[i].prompt = el.textContent.trim();
+            }
+        }
+    });
+}
+
+async function saveThenApprove(gid) {
+    collectEditedSteps();
+    // Save edited plan back to server before approving
+    try {
+        await api('/api/plan/'+gid+'/update', {
+            method: 'POST',
+            body: JSON.stringify({steps: _currentPlanSteps})
+        });
+    } catch(e) {
+        // If update endpoint doesn't exist yet, just approve with original
+    }
+    approvePlan(gid);
+}
 }
 
 async function approvePlan(gid) {

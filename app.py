@@ -213,6 +213,30 @@ async def get_plan(group_id: int):
     return detail
 
 
+class PlanUpdate(BaseModel):
+    steps: list
+
+
+@app.post("/api/plan/{group_id}/update")
+async def update_plan_route(group_id: int, body: PlanUpdate):
+    group = await fetch_one("SELECT * FROM plan_groups WHERE id=?", (group_id,))
+    if not group:
+        raise HTTPException(404, "Plan group not found")
+    if group["status"] != "reviewing":
+        raise HTTPException(400, "Can only edit plans in reviewing status")
+    # Rebuild plan_text with updated steps
+    try:
+        plan_data = json.loads(group.get("plan_text", "{}") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        plan_data = {}
+    plan_data["steps"] = body.steps
+    await execute(
+        "UPDATE plan_groups SET plan_text=? WHERE id=?",
+        (json.dumps(plan_data, ensure_ascii=False), group_id),
+    )
+    return {"status": "updated"}
+
+
 @app.post("/api/plan/{group_id}/approve")
 async def approve_plan_route(group_id: int):
     notify_fn = scheduler.notify if scheduler else None
@@ -263,18 +287,7 @@ async def get_workers():
 async def ws_task_logs(ws: WebSocket, task_id: int):
     await manager.connect_task(ws, task_id)
     try:
-        # Send existing logs first
-        logs = await fetch_all(
-            "SELECT event_type, payload FROM task_logs WHERE task_id=? ORDER BY id",
-            (task_id,),
-        )
-        for log in logs:
-            await ws.send_text(json.dumps({
-                "task_id": task_id,
-                "event_type": log["event_type"],
-                "payload": json.loads(log["payload"]),
-            }))
-        # Keep alive
+        # History is loaded via HTTP GET /api/tasks/{id} — WebSocket only streams new events
         while True:
             await ws.receive_text()
     except WebSocketDisconnect:
