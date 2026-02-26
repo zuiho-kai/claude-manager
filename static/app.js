@@ -373,7 +373,6 @@ async function saveThenApprove(gid) {
     }
     approvePlan(gid);
 }
-}
 
 async function approvePlan(gid) {
     try { await api('/api/plan/'+gid+'/approve',{method:'POST'}); closeModal('planDetailModal'); refreshAll(); }
