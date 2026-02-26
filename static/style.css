@@ -136,6 +136,7 @@ body {
 .tag-completed { background: rgba(10,132,255,.12); color: var(--accent); }
 .tag-failed { background: rgba(255,69,58,.12); color: var(--red); }
 .tag-cancelled { background: rgba(142,142,147,.12); color: var(--dim); }
+.tag-pending { background: rgba(142,142,147,.08); color: var(--dim); font-style: italic; }
 .tag-planning { background: rgba(191,90,242,.12); color: var(--purple); }
 .tag-reviewing { background: rgba(255,159,10,.12); color: var(--orange); }
 .task-prompt {

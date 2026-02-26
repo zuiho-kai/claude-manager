@@ -143,7 +143,11 @@ def _extract_json(text):
 
 
 async def approve_plan(group_id: int, notify_scheduler=None) -> List[int]:
-    """Approve a plan and create subtasks for each step."""
+    """Approve a plan and create subtasks for each step.
+
+    Only the first step is queued immediately. Subsequent steps are created
+    with status='pending' and queued one-by-one as each step completes.
+    """
     group = await fetch_one("SELECT * FROM plan_groups WHERE id=?", (group_id,))
     if not group:
         return []
@@ -162,11 +166,13 @@ async def approve_plan(group_id: int, notify_scheduler=None) -> List[int]:
     for i, step in enumerate(steps):
         prompt = step.get("prompt", step.get("description", str(step)))
         title = step.get("title", f"Step {i+1}")
-        full_prompt = f"[Plan Step {i+1}: {title}]\n\n{prompt}"
+        full_prompt = f"[Plan Step {i+1}/{len(steps)}: {title}]\n\n{prompt}"
 
+        # Only first step is queued; rest are pending (sequential execution)
+        status = "queued" if i == 0 else "pending"
         task_id = await execute_returning(
-            "INSERT INTO tasks (prompt, status, mode, plan_group_id, priority) VALUES (?, 'queued', 'execute', ?, ?)",
-            (full_prompt, group_id, len(steps) - i),  # Higher priority for earlier steps
+            "INSERT INTO tasks (prompt, status, mode, plan_group_id, priority) VALUES (?, ?, 'execute', ?, ?)",
+            (full_prompt, status, group_id, len(steps) - i),
         )
         task_ids.append(task_id)
 
@@ -178,19 +184,35 @@ async def approve_plan(group_id: int, notify_scheduler=None) -> List[int]:
     if notify_scheduler:
         notify_scheduler()
 
-    logger.info(f"Plan group {group_id} approved, created {len(task_ids)} subtasks")
+    logger.info(f"Plan group {group_id} approved, created {len(task_ids)} subtasks (first queued, rest pending)")
     return task_ids
 
 
-async def check_plan_completion(group_id: int):
-    """Check if all subtasks in a plan group are done."""
+async def check_plan_completion(group_id: int, notify_scheduler=None):
+    """Check plan progress. If a step just completed, queue the next pending step."""
     tasks = await fetch_all(
-        "SELECT status FROM tasks WHERE plan_group_id=? AND mode='execute'",
+        "SELECT id, status FROM tasks WHERE plan_group_id=? AND mode='execute' ORDER BY id ASC",
         (group_id,),
     )
     if not tasks:
         return
 
+    # Find first pending step and queue it if all previous steps are done
+    all_active_done = True
+    for t in tasks:
+        if t["status"] in ("queued", "running"):
+            all_active_done = False
+            break
+        if t["status"] == "pending":
+            if all_active_done:
+                # Queue this step — previous steps are all done
+                await execute("UPDATE tasks SET status='queued' WHERE id=?", (t["id"],))
+                logger.info(f"Plan group {group_id}: queued next step task #{t['id']}")
+                if notify_scheduler:
+                    notify_scheduler()
+            return  # Don't check further
+
+    # If we get here, no pending or active steps — check if all done
     all_done = all(t["status"] in ("completed", "failed", "cancelled") for t in tasks)
     if all_done:
         await execute(

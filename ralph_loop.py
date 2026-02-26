@@ -145,10 +145,10 @@ class RalphLoop:
                     except Exception:
                         logger.exception(f"Plan completion failed for task {task_id}")
 
-                # Check if all subtasks in a plan group are done
+                # Check if all subtasks in a plan group are done / queue next step
                 if task.get("plan_group_id"):
                     try:
-                        await check_plan_completion(task["plan_group_id"])
+                        await check_plan_completion(task["plan_group_id"], notify_scheduler=self.notify)
                     except Exception:
                         logger.exception(f"Plan group check failed for task {task_id}")
 
