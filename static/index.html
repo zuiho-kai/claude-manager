@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>CCM</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- Top: Quick input (always visible, like article's "随时派活") -->
+    <div class="input-bar">
+        <div class="input-row">
+            <textarea id="quickInput" rows="1" placeholder="Tell Claude what to do..." oninput="autoGrow(this)"></textarea>
+            <button class="mic-btn" id="micBtn" onclick="toggleVoice(this)" title="Voice input">&#127908;</button>
+            <button class="send-btn" onclick="quickSend()" title="Send task">&#10148;</button>
+        </div>
+        <div class="input-meta">
+            <span id="connDot" class="conn-dot"></span>
+            <span id="connText" class="conn-text">connecting</span>
+            <span class="spacer"></span>
+            <button class="link-btn" onclick="openPlanModal()">Plan Mode</button>
+            <button class="link-btn" onclick="showProgress()">Experience</button>
+        </div>
+    </div>
+
+    <!-- Workers panel -->
+    <div class="section-label">Workers</div>
+    <div class="workers" id="workersPanel"></div>
+
+    <!-- Status bar -->
+    <div class="status-bar">
+        <span><b id="statRunning">0</b> running</span>
+        <span><b id="statQueued">0</b> queued</span>
+        <span><b id="statDone">0</b> done</span>
+        <span><b id="statFailed">0</b> failed</span>
+    </div>
+
+    <!-- Task tabs + list -->
+    <div class="tabs">
+        <div class="tab active" data-tab="all" onclick="switchTab('all')">All <span class="badge" id="badgeAll">0</span></div>
+        <div class="tab" data-tab="running" onclick="switchTab('running')">Running</div>
+        <div class="tab" data-tab="queued" onclick="switchTab('queued')">Queued</div>
+        <div class="tab" data-tab="done" onclick="switchTab('done')">Done</div>
+    </div>
+
+    <div class="task-list" id="taskList">
+        <div class="empty-state">No tasks yet. Type above to get started.</div>
+    </div>
+
+    <!-- Log panel (slides up when task selected) -->
+    <div class="log-overlay" id="logOverlay" style="display:none" onclick="if(event.target===this)closeLog()">
+        <div class="log-panel">
+            <div class="log-header">
+                <span>Task #<span id="logTaskId"></span> <span id="logStatus" class="tag"></span></span>
+                <div>
+                    <button class="btn-sm danger" id="logCancelBtn" onclick="cancelTask()">Cancel</button>
+                    <button class="btn-sm" onclick="closeLog()">Close</button>
+                </div>
+            </div>
+            <div class="log-content" id="logContent"></div>
+        </div>
+    </div>
+
+    <!-- Plan Modal -->
+    <div class="modal-overlay" id="planModal" onclick="if(event.target===this)closeModal('planModal')">
+        <div class="modal">
+            <h2>Plan Mode</h2>
+            <p class="hint">Describe a high-level goal. Claude generates a plan, you review, then approve to auto-execute.</p>
+            <div class="input-row modal-input">
+                <textarea id="planGoal" rows="3" placeholder="e.g. Build user auth with JWT, login/register endpoints, and middleware"></textarea>
+                <button class="mic-btn" onclick="voiceInto('planGoal')">&#127908;</button>
+            </div>
+            <div class="modal-actions">
+                <button class="btn-sm" onclick="closeModal('planModal')">Cancel</button>
+                <button class="btn-sm primary" onclick="submitPlan()">Generate Plan</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Plan Detail Modal -->
+    <div class="modal-overlay" id="planDetailModal" onclick="if(event.target===this)closeModal('planDetailModal')">
+        <div class="modal">
+            <h2 id="planDetailGoal"></h2>
+            <div id="planDetailStatus" style="margin-bottom:10px"></div>
+            <ol class="plan-steps" id="planSteps"></ol>
+            <div class="modal-actions" id="planDetailActions"></div>
+        </div>
+    </div>
+
+    <!-- Progress Modal -->
+    <div class="modal-overlay" id="progressModal" onclick="if(event.target===this)closeModal('progressModal')">
+        <div class="modal">
+            <h2>Experience Notes</h2>
+            <p class="hint">Auto-collected lessons from completed tasks. Injected into future prompts.</p>
+            <div id="progressList"></div>
+            <div class="modal-actions">
+                <button class="btn-sm" onclick="closeModal('progressModal')">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
