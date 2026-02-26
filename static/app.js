@@ -24,13 +24,17 @@ function autoGrow(el) {
     el.style.height = Math.min(el.scrollHeight, 120) + 'px';
 }
 
+var _sending = false;
 async function quickSend() {
+    if (_sending) return;
     var el = document.getElementById('quickInput');
     var text = el.value.trim();
     if (!text) return;
+    _sending = true;
     el.value = ''; el.style.height = 'auto';
     try { await api('/api/tasks', { method:'POST', body: JSON.stringify({prompt:text}) }); refreshAll(); }
     catch(e) { alert('Failed: '+e.message); }
+    finally { _sending = false; }
 }
 
 // --- Status ---
@@ -104,6 +108,13 @@ function switchTab(tab) {
 
 // --- Log panel ---
 async function selectTask(id) {
+    // If this is a plan task, open the plan review modal instead
+    var task = tasks.find(function(t){return t.id===id;});
+    if (task && task.mode === 'plan' && task.plan_group_id) {
+        viewPlan(task.plan_group_id);
+        return;
+    }
+
     selectedTaskId = id;
     var overlay = document.getElementById('logOverlay');
     var content = document.getElementById('logContent');
@@ -215,7 +226,11 @@ function connectEvents() {
             if (m.event_type==='scheduler'||(m.payload&&m.payload.type==='scheduler_status')) {
                 refreshStatus();
             }
-            if (m.payload&&m.payload.type==='result') refreshAll();
+            if (m.payload&&m.payload.type==='result') {
+                refreshAll();
+                // Auto-open plan review if a plan task just completed
+                checkPlanReady();
+            }
         } catch(err){}
     };
     eventsWs.onclose = function() {
@@ -226,6 +241,25 @@ function connectEvents() {
 }
 
 // --- Plan ---
+var _lastCheckedPlanIds = {};
+
+async function checkPlanReady() {
+    // Look for plan tasks that just completed — check if their plan group is now "reviewing"
+    try {
+        var planTasks = tasks.filter(function(t){ return t.mode === 'plan' && t.plan_group_id && (t.status === 'completed' || t.status === 'failed'); });
+        for (var i = 0; i < planTasks.length; i++) {
+            var gid = planTasks[i].plan_group_id;
+            if (_lastCheckedPlanIds[gid]) continue;
+            var plan = await api('/api/plan/' + gid);
+            if (plan.status === 'reviewing') {
+                _lastCheckedPlanIds[gid] = true;
+                viewPlan(gid);
+                return;
+            }
+        }
+    } catch(e) {}
+}
+
 function openPlanModal() { document.getElementById('planGoal').value=''; openModal('planModal'); document.getElementById('planGoal').focus(); }
 
 async function submitPlan() {
