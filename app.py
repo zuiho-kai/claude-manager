@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from db import init_db, fetch_all, fetch_one, execute, execute_returning
 from ralph_loop import RalphLoop
 from worktree import init_pool, get_repo_root_sync, list_worktrees, remove_worktree
-from plan_mode import create_plan_group, get_plan_detail, approve_plan, on_plan_task_complete, check_plan_completion
+from plan_mode import create_plan_group, get_plan_detail, approve_plan, on_plan_task_complete, check_plan_completion, discuss, generate_plan_from_discussion, get_discussion_messages
 from progress import get_progress_entries, record_progress, get_relevant_experience
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -148,6 +148,20 @@ async def list_tasks(status: Optional[str] = None):
     # Truncate prompt for list view
     for t in tasks:
         t["prompt_short"] = t["prompt"][:100]
+    # Attach plan_status and plan_goal for tasks belonging to a plan group
+    group_ids = list({t["plan_group_id"] for t in tasks if t["plan_group_id"]})
+    if group_ids:
+        placeholders = ",".join("?" * len(group_ids))
+        groups = await fetch_all(
+            f"SELECT id, goal, status FROM plan_groups WHERE id IN ({placeholders})",
+            group_ids,
+        )
+        group_map = {g["id"]: g for g in groups}
+        for t in tasks:
+            if t["plan_group_id"] and t["plan_group_id"] in group_map:
+                g = group_map[t["plan_group_id"]]
+                t["plan_status"] = g["status"]
+                t["plan_goal"] = g["goal"]
     return tasks
 
 
@@ -199,10 +213,8 @@ async def delete_worktree(wt_id: int):
 
 @app.post("/api/plan")
 async def create_plan(body: PlanCreate):
-    group_id = await create_plan_group(body.goal)
-    if scheduler:
-        scheduler.notify()
-    return {"group_id": group_id, "status": "planning"}
+    result = await create_plan_group(body.goal)
+    return result
 
 
 @app.get("/api/plan/{group_id}")
@@ -211,6 +223,43 @@ async def get_plan(group_id: int):
     if not detail:
         raise HTTPException(404, "Plan group not found")
     return detail
+
+
+class DiscussMessage(BaseModel):
+    message: str
+
+
+@app.post("/api/plan/{group_id}/discuss")
+async def discuss_plan(group_id: int, body: DiscussMessage):
+    group = await fetch_one("SELECT * FROM plan_groups WHERE id=?", (group_id,))
+    if not group:
+        raise HTTPException(404, "Plan group not found")
+    if group["status"] != "discussing":
+        raise HTTPException(400, "Plan is not in discussing state")
+    result = await discuss(group_id, body.message)
+    return result
+
+
+@app.post("/api/plan/{group_id}/generate")
+async def generate_plan(group_id: int):
+    group = await fetch_one("SELECT * FROM plan_groups WHERE id=?", (group_id,))
+    if not group:
+        raise HTTPException(404, "Plan group not found")
+    if group["status"] != "discussing":
+        raise HTTPException(400, "Plan is not in discussing state")
+    task_id = await generate_plan_from_discussion(group_id)
+    if scheduler:
+        scheduler.notify()
+    return {"status": "planning", "task_id": task_id}
+
+
+@app.get("/api/plan/{group_id}/discussion")
+async def get_discussion(group_id: int):
+    group = await fetch_one("SELECT * FROM plan_groups WHERE id=?", (group_id,))
+    if not group:
+        raise HTTPException(404, "Plan group not found")
+    messages = await get_discussion_messages(group_id)
+    return messages
 
 
 class PlanUpdate(BaseModel):
@@ -235,6 +284,25 @@ async def update_plan_route(group_id: int, body: PlanUpdate):
         (json.dumps(plan_data, ensure_ascii=False), group_id),
     )
     return {"status": "updated"}
+
+
+@app.get("/api/plan/{group_id}/full")
+async def get_plan_full(group_id: int):
+    group = await fetch_one("SELECT * FROM plan_groups WHERE id=?", (group_id,))
+    if not group:
+        raise HTTPException(404, "Plan group not found")
+    discussions = await get_discussion_messages(group_id)
+    detail = await get_plan_detail(group_id)
+    execute_tasks = await fetch_all(
+        "SELECT id, prompt, status, mode, created_at, started_at, finished_at, cost_usd FROM tasks WHERE plan_group_id=? AND mode='execute' ORDER BY id",
+        (group_id,),
+    )
+    return {
+        "group": dict(group),
+        "discussions": discussions,
+        "plan_steps": detail.get("plan_steps", []) if detail else [],
+        "tasks": execute_tasks,
+    }
 
 
 @app.post("/api/plan/{group_id}/approve")

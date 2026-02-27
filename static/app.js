@@ -72,31 +72,60 @@ async function refreshTasks() {
 
 function renderTasks() {
     var list = document.getElementById('taskList');
-    var filtered;
-    if (currentTab === 'all') filtered = tasks;
-    else if (currentTab === 'done') filtered = tasks.filter(function(t){return t.status==='completed'||t.status==='failed'||t.status==='cancelled';});
-    else filtered = tasks.filter(function(t){return t.status===currentTab;});
 
-    var c = {};
-    tasks.forEach(function(t){c[t.status]=(c[t.status]||0)+1;});
-    document.getElementById('badgeAll').textContent = tasks.length;
+    // Collect plan group representatives (prefer mode='plan' task per group)
+    var planReps = {}; // group_id → task
+    tasks.forEach(function(t) {
+        if (!t.plan_group_id) return;
+        if (t.mode === 'plan') { planReps[t.plan_group_id] = t; }
+        else if (!planReps[t.plan_group_id]) { planReps[t.plan_group_id] = t; }
+    });
+
+    // Filter: normal tasks + one rep per plan group
+    var visible = tasks.filter(function(t) {
+        if (!t.plan_group_id) return true;
+        return planReps[t.plan_group_id] && planReps[t.plan_group_id].id === t.id;
+    });
+
+    var filtered;
+    if (currentTab === 'all') filtered = visible;
+    else if (currentTab === 'done') filtered = visible.filter(function(t){
+        // For plan reps, use plan_status if available
+        var st = t.plan_group_id ? (t.plan_status || t.status) : t.status;
+        return st==='completed'||st==='failed'||st==='cancelled';
+    });
+    else filtered = visible.filter(function(t){
+        var st = t.plan_group_id ? (t.plan_status || t.status) : t.status;
+        return st===currentTab;
+    });
+
+    document.getElementById('badgeAll').textContent = visible.length;
 
     if (!filtered.length) { list.innerHTML = '<div class="empty-state">No tasks here.</div>'; return; }
     list.innerHTML = filtered.map(function(t) {
-        var promptText = t.prompt_short||t.prompt||'';
+        var isPlan = !!t.plan_group_id;
+        var displayStatus = isPlan ? (t.plan_status || t.status) : t.status;
+        var promptText = isPlan
+            ? (t.plan_goal || t.plan_status || '[Plan]')
+            : (t.prompt_short || t.prompt || '');
+
         // Clean up plan-mode tasks: show goal instead of verbose template
-        if (t.mode === 'plan' && promptText.indexOf('GOAL:') !== -1) {
+        if (!isPlan && t.mode === 'plan' && promptText.indexOf('GOAL:') !== -1) {
             var goalMatch = promptText.match(/GOAL:\s*\n([\s\S]*?)(\n\nOutput|$)/);
             promptText = goalMatch ? '[Plan] ' + goalMatch[1].trim() : '[Plan] generating...';
         }
-        var p = esc(promptText.substring(0,120));
+
+        var p = esc(promptText.substring(0, 120));
         var active = t.id === selectedTaskId ? ' active' : '';
-        var plan = t.plan_group_id ? '<span class="plan-link" onclick="event.stopPropagation();viewPlan('+t.plan_group_id+')">plan#'+t.plan_group_id+'</span>' : '';
         var cost = t.cost_usd ? '$'+t.cost_usd.toFixed(3) : '';
-        return '<div class="task-card'+active+'" onclick="selectTask('+t.id+')">' +
-            '<div class="task-top"><span class="task-id">#'+t.id+'</span><span class="tag tag-'+t.status+'">'+t.status+'</span></div>' +
+        var clickFn = isPlan
+            ? 'openPlanDetail(' + t.plan_group_id + ')'
+            : 'selectTask(' + t.id + ')';
+        var planBadge = isPlan ? '<span class="tag tag-planning" style="font-size:9px">PLAN</span> ' : '';
+        return '<div class="task-card'+active+'" onclick="'+clickFn+'">' +
+            '<div class="task-top"><span class="task-id">'+planBadge+(isPlan?'plan#'+t.plan_group_id:'#'+t.id)+'</span><span class="tag tag-'+displayStatus+'">'+displayStatus+'</span></div>' +
             '<div class="task-prompt">'+p+'</div>' +
-            '<div class="task-meta">'+plan+(cost?'<span>'+cost+'</span>':'')+'<span>'+timeAgo(t.created_at)+'</span></div></div>';
+            '<div class="task-meta">'+(cost?'<span>'+cost+'</span>':'')+'<span>'+timeAgo(t.created_at)+'</span></div></div>';
     }).join('');
 }
 
@@ -108,10 +137,10 @@ function switchTab(tab) {
 
 // --- Log panel ---
 async function selectTask(id) {
-    // If this is a plan task, open the plan review modal instead
+    // If this is a plan rep card, open plan detail instead
     var task = tasks.find(function(t){return t.id===id;});
-    if (task && task.mode === 'plan' && task.plan_group_id) {
-        viewPlan(task.plan_group_id);
+    if (task && task.plan_group_id) {
+        openPlanDetail(task.plan_group_id);
         return;
     }
 
@@ -242,6 +271,7 @@ function connectEvents() {
 
 // --- Plan ---
 var _lastCheckedPlanIds = {};
+var _discussGroupId = null;
 
 async function checkPlanReady() {
     // Look for plan tasks that just completed — check if their plan group is now "reviewing"
@@ -260,16 +290,212 @@ async function checkPlanReady() {
     } catch(e) {}
 }
 
-function openPlanModal() { document.getElementById('planGoal').value=''; openModal('planModal'); document.getElementById('planGoal').focus(); }
+function openPlanModal() {
+    document.getElementById('planGoal').value='';
+    document.getElementById('planGoalPhase').style.display='';
+    document.getElementById('planDiscussPhase').style.display='none';
+    _discussGroupId = null;
+    openModal('planModal');
+    document.getElementById('planGoal').focus();
+}
 
 async function submitPlan() {
     var goal = document.getElementById('planGoal').value.trim();
     if (!goal) return;
+    var btn = document.querySelector('#planGoalPhase .primary');
+    btn.disabled = true; btn.textContent = '生成中...';
     try {
         var r = await api('/api/plan',{method:'POST',body:JSON.stringify({goal:goal})});
-        closeModal('planModal'); refreshAll();
-        // Poll until plan is ready for review (or timeout after 120s)
-        var gid = r.group_id;
+        _discussGroupId = r.group_id;
+
+        // Switch to discussion phase
+        document.getElementById('planGoalPhase').style.display='none';
+        document.getElementById('planDiscussPhase').style.display='';
+        var msgs = document.getElementById('discussMessages');
+        msgs.innerHTML = '';
+
+        if (r.done) {
+            // Claude already has enough info, go straight to generate
+            appendDiscussMsg('assistant', r.first_question);
+            await triggerGenerate();
+        } else {
+            appendDiscussMsg('assistant', r.first_question, r.options);
+            document.getElementById('discussInput').focus();
+        }
+    } catch(e) { alert(e.message); }
+    finally { btn.disabled = false; btn.textContent = '开始'; }
+}
+
+function appendDiscussMsg(role, text, options) {
+    var msgs = document.getElementById('discussMessages');
+
+    if (role === 'assistant' && options && options.length) {
+        // Question text as standalone line
+        var qDiv = document.createElement('div');
+        qDiv.className = 'discuss-question';
+        qDiv.textContent = text;
+        msgs.appendChild(qDiv);
+
+        // Options list
+        var listDiv = document.createElement('div');
+        listDiv.className = 'discuss-select';
+        listDiv._options = options;
+        listDiv._selectedIdx = 0;
+
+        options.forEach(function(opt, idx) {
+            var item = document.createElement('div');
+            item.className = 'discuss-select-item' + (idx === 0 ? ' selected' : '');
+            item.setAttribute('data-idx', idx);
+            var recText = idx === 0 ? ' (Recommended)' : '';
+            item.innerHTML =
+                '<span class="select-cursor">❯</span>' +
+                '<span class="select-num">' + (idx + 1) + '.</span>' +
+                '<div class="select-content">' +
+                    '<span class="select-label">' + esc(opt.label) + recText + '</span>' +
+                    (opt.description ? '<span class="select-desc">' + esc(opt.description) + '</span>' : '') +
+                '</div>';
+            item.onclick = function() {
+                selectOption(listDiv, idx);
+                // Single click sends immediately
+                confirmOption(listDiv);
+            };
+            listDiv.appendChild(item);
+        });
+
+        // Separator
+        var sep = document.createElement('div');
+        sep.className = 'discuss-separator';
+        sep.textContent = '────────────────────────────────────────';
+        listDiv.appendChild(sep);
+
+        // Custom input action
+        var customNum = options.length + 1;
+        var customItem = document.createElement('div');
+        customItem.className = 'discuss-select-item action-item';
+        customItem.setAttribute('data-idx', customNum - 1);
+        customItem.setAttribute('data-custom', 'true');
+        customItem.innerHTML =
+            '<span class="select-cursor">❯</span>' +
+            '<span class="select-num">' + customNum + '.</span>' +
+            '<div class="select-content"><span class="select-label">自定义输入</span></div>';
+        customItem.onclick = function() {
+            listDiv.remove();
+            document.getElementById('discussInputRow').style.display = 'flex';
+            document.getElementById('discussInput').focus();
+        };
+        listDiv.appendChild(customItem);
+
+        // Skip action
+        var skipNum = customNum + 1;
+        var skipItem = document.createElement('div');
+        skipItem.className = 'discuss-select-item action-item';
+        skipItem.innerHTML =
+            '<span class="select-cursor">❯</span>' +
+            '<span class="select-num">' + skipNum + '.</span>' +
+            '<div class="select-content"><span class="select-label">跳过讨论，直接生成计划</span></div>';
+        skipItem.onclick = function() {
+            listDiv.remove();
+            skipDiscuss();
+        };
+        listDiv.appendChild(skipItem);
+
+        msgs.appendChild(listDiv);
+    } else if (role === 'user') {
+        var uDiv = document.createElement('div');
+        uDiv.className = 'discuss-user-answer';
+        uDiv.textContent = '> ' + text;
+        msgs.appendChild(uDiv);
+    } else {
+        // Plain assistant message (e.g. summary, generating...)
+        var div = document.createElement('div');
+        div.className = 'discuss-question';
+        div.textContent = text;
+        msgs.appendChild(div);
+    }
+
+    msgs.scrollTop = msgs.scrollHeight;
+    document.getElementById('discussInputRow').style.display = 'none';
+}
+
+function selectOption(listDiv, idx) {
+    listDiv._selectedIdx = idx;
+    listDiv.querySelectorAll('.discuss-select-item').forEach(function(el) {
+        el.classList.toggle('selected', parseInt(el.getAttribute('data-idx')) === idx);
+    });
+}
+
+function confirmOption(listDiv) {
+    var idx = listDiv._selectedIdx;
+    var label = listDiv._options[idx].label;
+    listDiv.remove();
+    document.getElementById('discussInput').value = label;
+    sendDiscuss();
+}
+
+function pickOption(label) {
+    document.querySelectorAll('.discuss-select').forEach(function(el) { el.remove(); });
+    document.getElementById('discussInput').value = label;
+    sendDiscuss();
+}
+
+var _discussSending = false;
+async function sendDiscuss() {
+    if (_discussSending || !_discussGroupId) return;
+    var input = document.getElementById('discussInput');
+    var text = input.value.trim();
+    if (!text) return;
+    _discussSending = true;
+    input.value = ''; input.style.height = 'auto';
+
+    appendDiscussMsg('user', text);
+
+    // Remove any remaining option lists
+    document.querySelectorAll('.discuss-select').forEach(function(el) { el.remove(); });
+
+    // Show loading
+    var msgs = document.getElementById('discussMessages');
+    var loading = document.createElement('div');
+    loading.className = 'discuss-loading';
+    loading.textContent = 'Claude is thinking...';
+    msgs.appendChild(loading);
+    msgs.scrollTop = msgs.scrollHeight;
+
+    try {
+        var r = await api('/api/plan/'+_discussGroupId+'/discuss',{method:'POST',body:JSON.stringify({message:text})});
+        loading.remove();
+        appendDiscussMsg('assistant', r.reply, r.options);
+
+        if (r.done) {
+            await triggerGenerate();
+        } else {
+            document.getElementById('discussInput').focus();
+        }
+    } catch(e) {
+        loading.remove();
+        appendDiscussMsg('assistant', 'Error: ' + e.message);
+    }
+    finally { _discussSending = false; }
+}
+
+async function skipDiscuss() {
+    if (!_discussGroupId) return;
+    await triggerGenerate();
+}
+
+async function triggerGenerate() {
+    if (!_discussGroupId) return;
+    var gid = _discussGroupId;
+
+    // Show generating state
+    appendDiscussMsg('assistant', 'Generating plan...');
+    document.getElementById('discussInput').disabled = true;
+
+    try {
+        await api('/api/plan/'+gid+'/generate',{method:'POST'});
+        closeModal('planModal');
+        refreshAll();
+
+        // Poll until plan is ready for review
         var attempts = 0;
         var poll = setInterval(async function(){
             attempts++;
@@ -282,53 +508,153 @@ async function submitPlan() {
             } catch(e) { clearInterval(poll); }
         }, 2000);
     } catch(e) { alert(e.message); }
+    finally { document.getElementById('discussInput').disabled = false; }
 }
 
 var _currentPlanGid = null;
 var _currentPlanSteps = [];
+var _planDetailLogWs = null;
 
-async function viewPlan(gid) {
+async function openPlanDetail(gid) {
+    _currentPlanGid = gid;
     try {
-        var plan = await api('/api/plan/'+gid);
-        _currentPlanGid = gid;
-        document.getElementById('planDetailGoal').textContent = plan.goal||'';
-        var sc = plan.status==='reviewing'?'queued':plan.status==='executing'?'running':plan.status;
-        document.getElementById('planDetailStatus').innerHTML = '<span class="tag tag-'+sc+'">'+plan.status+'</span>';
-        var sl = document.getElementById('planSteps');
-        var steps = plan.plan_steps||[], subs = plan.tasks||[];
+        var data = await api('/api/plan/' + gid + '/full');
+        var group = data.group;
+        var discussions = data.discussions || [];
+        var steps = data.plan_steps || [];
+        var execTasks = data.tasks || [];
         _currentPlanSteps = steps;
 
-        if (steps.length && plan.status === 'reviewing') {
-            // Editable plan review
-            sl.innerHTML = steps.map(function(s,i){
-                return '<li class="plan-step" data-step="'+i+'">' +
+        // Header
+        document.getElementById('planDetailGoal').textContent = group.goal || '';
+        var sc = group.status === 'reviewing' ? 'queued' : group.status === 'executing' ? 'running' : group.status;
+        document.getElementById('planDetailStatus').innerHTML = '<span class="tag tag-' + sc + '">' + group.status + '</span>';
+
+        // Discussion section
+        var discussEl = document.getElementById('planDetailDiscuss');
+        if (discussions.length) {
+            discussEl.innerHTML = discussions.map(function(m) {
+                return '<div class="plan-detail-discuss-msg ' + esc(m.role) + '">' +
+                    (m.role === 'user' ? '> ' : '') + esc(m.content) + '</div>';
+            }).join('');
+            // Start collapsed
+            discussEl.classList.add('collapsed');
+            document.getElementById('toggleDiscuss').textContent = '▸';
+        } else {
+            discussEl.innerHTML = '<span style="color:var(--dim);font-size:11px">No discussion recorded.</span>';
+        }
+
+        // Plan steps
+        var sl = document.getElementById('planSteps');
+        if (steps.length && group.status === 'reviewing') {
+            sl.innerHTML = steps.map(function(s, i) {
+                return '<li class="plan-step" data-step="' + i + '">' +
                     '<div style="display:flex;justify-content:space-between;align-items:center">' +
-                    '<strong contenteditable="true" class="step-title" data-idx="'+i+'">'+esc(s.title||'Step '+(i+1))+'</strong>' +
-                    '<button class="btn-sm danger" style="padding:2px 6px;font-size:10px" onclick="removeStep('+i+')">✕</button></div>' +
-                    '<div contenteditable="true" class="step-desc step-desc-edit" data-idx="'+i+'">'+esc(s.description||'')+'</div>' +
+                    '<strong contenteditable="true" class="step-title" data-idx="' + i + '">' + esc(s.title || 'Step ' + (i+1)) + '</strong>' +
+                    '<button class="btn-sm danger" style="padding:2px 6px;font-size:10px" onclick="removeStep(' + i + ')">✕</button></div>' +
+                    '<div contenteditable="true" class="step-desc step-desc-edit" data-idx="' + i + '">' + esc(s.description || '') + '</div>' +
                     '</li>';
             }).join('') +
             '<li class="plan-step" style="text-align:center;cursor:pointer;color:var(--accent)" onclick="addStep()">+ Add step</li>';
         } else if (steps.length) {
-            // Read-only view (executing/completed)
-            sl.innerHTML = steps.map(function(s,i){
-                var sub = subs.find(function(t){return t.prompt&&t.prompt.indexOf('Step '+(i+1))!==-1;});
-                var cls = sub?(sub.status==='completed'?'done':sub.status==='running'?'running':''):'';
-                return '<li class="plan-step '+cls+'"><strong>'+esc(s.title||'Step '+(i+1))+'</strong>'+
-                    '<div class="step-desc">'+esc(s.description||'')+'</div>'+
-                    (sub?'<span class="tag tag-'+sub.status+'">'+sub.status+'</span>':'')+'</li>';
+            sl.innerHTML = steps.map(function(s, i) {
+                var sub = execTasks[i] || execTasks.find(function(t) { return t.prompt && t.prompt.indexOf('Step ' + (i+1)) !== -1; });
+                var cls = sub ? (sub.status === 'completed' ? 'done' : sub.status === 'running' ? 'running' : '') : '';
+                var icon = sub ? (sub.status === 'completed' ? ' ✓' : sub.status === 'running' ? ' ⟳' : ' ·') : '';
+                return '<li class="plan-step ' + cls + '"><strong>' + esc(s.title || 'Step ' + (i+1)) + icon + '</strong>' +
+                    '<div class="step-desc">' + esc(s.description || '') + '</div>' +
+                    (sub ? '<span class="tag tag-' + sub.status + '">' + sub.status + '</span>' : '') + '</li>';
             }).join('');
-        } else if (plan.plan_text) {
-            sl.innerHTML = '<li class="plan-step"><pre style="white-space:pre-wrap;font-size:12px">'+esc(plan.plan_text)+'</pre></li>';
-        } else { sl.innerHTML = '<li class="plan-step" style="color:var(--dim)">Generating plan...</li>'; }
+        } else {
+            sl.innerHTML = '<li class="plan-step" style="color:var(--dim)">Generating plan...</li>';
+        }
 
+        // Execution log section — show if executing/completed
+        var logSection = document.getElementById('planDetailLogSection');
+        var logEl = document.getElementById('planDetailLog');
+        if (group.status === 'executing' || group.status === 'completed') {
+            logSection.style.display = '';
+            // Find the currently running execute task
+            var runningTask = execTasks.find(function(t) { return t.status === 'running'; })
+                || execTasks.slice().reverse().find(function(t) { return t.status === 'completed'; });
+            if (runningTask) {
+                logEl.textContent = 'Loading log for step task #' + runningTask.id + '...';
+                try {
+                    var td = await api('/api/tasks/' + runningTask.id);
+                    logEl.textContent = '';
+                    (td.logs || []).forEach(function(l) {
+                        var payload;
+                        try { payload = typeof l.payload === 'string' ? JSON.parse(l.payload) : l.payload; } catch(e) { payload = {text: l.payload}; }
+                        var f = fmtLog(l.event_type, payload);
+                        if (f.html) {
+                            var d = document.createElement('div');
+                            d.innerHTML = f.html;
+                            logEl.appendChild(d);
+                        }
+                    });
+                    logEl.scrollTop = logEl.scrollHeight;
+                    // Stream live if running
+                    if (runningTask.status === 'running') {
+                        connectPlanLogWs(runningTask.id, logEl);
+                    }
+                } catch(e) { logEl.textContent = 'Could not load log.'; }
+            } else {
+                logSection.style.display = 'none';
+            }
+        } else {
+            logSection.style.display = 'none';
+        }
+
+        // Actions
         var acts = document.getElementById('planDetailActions');
-        acts.innerHTML = plan.status==='reviewing'
-            ? '<button class="btn-sm" onclick="closeModal(\'planDetailModal\')">Close</button><button class="btn-sm primary" onclick="saveThenApprove('+gid+')">Approve</button>'
-            : '<button class="btn-sm" onclick="closeModal(\'planDetailModal\')">Close</button>';
+        acts.innerHTML = group.status === 'reviewing'
+            ? '<button class="btn-sm" onclick="closePlanDetail()">Close</button><button class="btn-sm primary" onclick="saveThenApprove(' + gid + ')">Approve</button>'
+            : '<button class="btn-sm" onclick="closePlanDetail()">Close</button>';
+
         openModal('planDetailModal');
     } catch(e) { alert(e.message); }
 }
+
+function closePlanDetail() {
+    closeModal('planDetailModal');
+    if (_planDetailLogWs) { _planDetailLogWs.close(); _planDetailLogWs = null; }
+}
+
+function connectPlanLogWs(taskId, logEl) {
+    if (_planDetailLogWs) _planDetailLogWs.close();
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    _planDetailLogWs = new WebSocket(proto + '//' + location.host + '/ws/logs/' + taskId);
+    _planDetailLogWs.onmessage = function(e) {
+        try {
+            var m = JSON.parse(e.data);
+            var payload;
+            try { payload = typeof m.payload === 'string' ? JSON.parse(m.payload) : m.payload; } catch(err) { payload = m.payload; }
+            var f = fmtLog(m.event_type, payload);
+            if (f.html) {
+                var d = document.createElement('div');
+                d.innerHTML = f.html;
+                logEl.appendChild(d);
+                logEl.scrollTop = logEl.scrollHeight;
+            }
+        } catch(err) {}
+    };
+    _planDetailLogWs.onclose = function() { _planDetailLogWs = null; };
+}
+
+function toggleSection(id) {
+    var el = document.getElementById(id);
+    var tog = document.getElementById('toggle' + id.replace('planDetail', ''));
+    if (el.classList.contains('collapsed')) {
+        el.classList.remove('collapsed');
+        if (tog) tog.textContent = '▾';
+    } else {
+        el.classList.add('collapsed');
+        if (tog) tog.textContent = '▸';
+    }
+}
+
+// Keep viewPlan as alias for backward compat (checkPlanReady uses it)
+function viewPlan(gid) { openPlanDetail(gid); }
 
 function removeStep(idx) {
     _currentPlanSteps.splice(idx, 1);
@@ -375,7 +701,7 @@ async function saveThenApprove(gid) {
 }
 
 async function approvePlan(gid) {
-    try { await api('/api/plan/'+gid+'/approve',{method:'POST'}); closeModal('planDetailModal'); refreshAll(); }
+    try { await api('/api/plan/'+gid+'/approve',{method:'POST'}); closePlanDetail(); refreshAll(); }
     catch(e) { alert(e.message); }
 }
 
@@ -428,8 +754,18 @@ document.addEventListener('keydown', function(e) {
         closeLog();
     }
     if (e.ctrlKey && e.key==='Enter') {
-        if (document.getElementById('planModal').classList.contains('open')) submitPlan();
+        if (document.getElementById('planModal').classList.contains('open')) {
+            if (document.getElementById('planGoalPhase').style.display !== 'none') submitPlan();
+        }
     }
+});
+
+// Enter to send discuss message
+document.addEventListener('DOMContentLoaded', function() {
+    var di = document.getElementById('discussInput');
+    if (di) di.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendDiscuss(); }
+    });
 });
 
 // --- Util ---

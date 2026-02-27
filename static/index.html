@@ -66,25 +66,58 @@
     <!-- Plan Modal -->
     <div class="modal-overlay" id="planModal" onclick="if(event.target===this)closeModal('planModal')">
         <div class="modal">
-            <h2>Plan Mode</h2>
-            <p class="hint">Describe a high-level goal. Claude generates a plan, you review, then approve to auto-execute.</p>
-            <div class="input-row modal-input">
-                <textarea id="planGoal" rows="3" placeholder="e.g. Build user auth with JWT, login/register endpoints, and middleware"></textarea>
-                <button class="mic-btn" onclick="voiceInto('planGoal')">&#127908;</button>
+            <!-- Phase 1: Goal input -->
+            <div id="planGoalPhase">
+                <h2>Plan Mode</h2>
+                <p class="hint">Describe a high-level goal. Claude will discuss details with you before generating a plan.</p>
+                <div class="input-row modal-input">
+                    <textarea id="planGoal" rows="3" placeholder="e.g. Build user auth with JWT, login/register endpoints, and middleware"></textarea>
+                    <button class="mic-btn" onclick="voiceInto('planGoal')">&#127908;</button>
+                </div>
+                <div class="modal-actions">
+                    <button class="btn-sm" onclick="closeModal('planModal')">Cancel</button>
+                    <button class="btn-sm primary" onclick="submitPlan()">开始</button>
+                </div>
             </div>
-            <div class="modal-actions">
-                <button class="btn-sm" onclick="closeModal('planModal')">Cancel</button>
-                <button class="btn-sm primary" onclick="submitPlan()">Generate Plan</button>
+            <!-- Phase 2: Discussion -->
+            <div id="planDiscussPhase" style="display:none">
+                <div id="discussMessages" class="discuss-messages"></div>
+                <div id="discussInputRow" class="discuss-input-row" style="display:none">
+                    <textarea id="discussInput" rows="1" placeholder="输入自定义回答..." oninput="autoGrow(this)"></textarea>
+                    <button class="send-btn" onclick="sendDiscuss()">&#10148;</button>
+                </div>
             </div>
         </div>
     </div>
 
     <!-- Plan Detail Modal -->
-    <div class="modal-overlay" id="planDetailModal" onclick="if(event.target===this)closeModal('planDetailModal')">
-        <div class="modal">
-            <h2 id="planDetailGoal"></h2>
-            <div id="planDetailStatus" style="margin-bottom:10px"></div>
-            <ol class="plan-steps" id="planSteps"></ol>
+    <div class="modal-overlay" id="planDetailModal" onclick="if(event.target===this)closePlanDetail()">
+        <div class="modal plan-detail-modal">
+            <div class="plan-detail-header">
+                <span id="planDetailGoal" class="plan-detail-goal"></span>
+                <span id="planDetailStatus"></span>
+            </div>
+
+            <!-- Section: Discussion -->
+            <div class="plan-detail-section">
+                <div class="plan-detail-section-title" onclick="toggleSection('planDetailDiscuss')">
+                    <span>讨论记录</span><span class="section-toggle" id="toggleDiscuss">▾</span>
+                </div>
+                <div id="planDetailDiscuss" class="plan-detail-discuss"></div>
+            </div>
+
+            <!-- Section: Plan Steps -->
+            <div class="plan-detail-section">
+                <div class="plan-detail-section-title">计划步骤</div>
+                <ol class="plan-steps" id="planSteps"></ol>
+            </div>
+
+            <!-- Section: Execution Log -->
+            <div class="plan-detail-section" id="planDetailLogSection" style="display:none">
+                <div class="plan-detail-section-title">执行日志</div>
+                <div id="planDetailLog" class="plan-detail-log"></div>
+            </div>
+
             <div class="modal-actions" id="planDetailActions"></div>
         </div>
     </div>
